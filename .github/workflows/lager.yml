@@ -1,0 +1,27 @@
+name: Opdater Plytix lager
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  opdater-lager:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install paramiko
+      - name: Opdater samlet_lager i Plytix
+        env:
+          PLX_KEY: ${{ secrets.PLX_KEY }}
+          PLX_PWD: ${{ secrets.PLX_PWD }}
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_USER: ${{ secrets.SFTP_USER }}
+          SFTP_PASS: ${{ secrets.SFTP_PASS }}
+          SFTP_FILE: ${{ secrets.SFTP_FILE }}
+          EXCLUDE_LOCATIONS: 'Business Central,Fjernlager'
+          DRY_RUN: '0'
+        run: python opdater_lager.py
