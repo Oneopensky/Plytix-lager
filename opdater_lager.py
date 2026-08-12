@@ -3,23 +3,23 @@
 """
 Opdater Plytix 'samlet_lager' fra en Matrixify Shopify-eksport.  (hurtig, fil-drevet)
  
-Sådan virker den:
-  1) Henter CSV (lokalt via CSV_PATH, eller fra Hetzner-boksen via SFTP hvis SFTP_HOST er sat)
-  2) Bygger {variant-SKU: samlet lager paa tvaers af valgte lokationer}
-  3) Slaar filens SKU'er op i Plytix:
-       SINGLE  -> skriver produktets eget lager
-       VARIANT -> skriver barnets eget lager  (og laegges til dets parents sum)
-  4) Henter alle PARENT-produkter og skriver summen af deres boerns lager
-  5) Springer produkter over hvis vaerdien er uaendret. Skriver kun ved DRY_RUN=0.
+To tilstande:
+  - Normal (GitHub/dagligt): skriver aendringer til Plytix via API (skipper uaendrede).
+  - OUTPUT_CSV sat: skriver i stedet en import-fil (SKU,samlet_lager) til bulk-import
+    i Plytix - god til den foerste, store indlaesning. Skriver da INTET til API'et.
+ 
+Logik:
+  SINGLE  -> produktets eget lager
+  VARIANT -> barnets eget lager (laegges til dets parents sum)
+  PARENT  -> summen af boernenes lager
  
 Miljovariabler:
   PLX_KEY, PLX_PWD        (kraevet)
-  DRY_RUN=1               1=vis kun plan (standard), 0=skriv rigtigt
+  DRY_RUN=1               1=vis kun plan, 0=skriv rigtigt (ignoreres hvis OUTPUT_CSV er sat)
+  OUTPUT_CSV=sti          skriv import-fil i stedet for at skrive til API
   TARGET_FIELD=samlet_lager
   EXCLUDE_LOCATIONS=      komma-liste; lokationer hvis navn indeholder et ord udelades
-  Filkilde - vaelg én:
-    CSV_PATH             sti til en lokal Matrixify-fil
-    ELLER SFTP_HOST + SFTP_USER + SFTP_PASS + SFTP_FILE   (henter fra boksen)
+  Filkilde: CSV_PATH (lokal fil)  ELLER  SFTP_HOST + SFTP_USER + SFTP_PASS + SFTP_FILE
 """
 import os, json, sys, csv, time, tempfile, urllib.request, urllib.error
  
@@ -27,11 +27,11 @@ KEY=os.environ.get("PLX_KEY","").strip(); PWD=os.environ.get("PLX_PWD","").strip
 CSV_PATH=os.environ.get("CSV_PATH","").strip()
 TARGET=os.environ.get("TARGET_FIELD","samlet_lager").strip()
 DRY=os.environ.get("DRY_RUN","1")!="0"
+OUTPUT_CSV=os.environ.get("OUTPUT_CSV","").strip()
 EXCL=[s.strip().lower() for s in os.environ.get("EXCLUDE_LOCATIONS","").split(",") if s.strip()]
 SFTP_HOST=os.environ.get("SFTP_HOST","").strip()
 if not KEY or not PWD: sys.exit("Saet PLX_KEY og PLX_PWD.")
  
-# ---------- Hent fil fra boksen via SFTP hvis relevant ----------
 if SFTP_HOST and not (CSV_PATH and os.path.exists(CSV_PATH)):
     import paramiko, stat as _stat
     local=os.path.join(tempfile.gettempdir(),"shopify_lager.csv")
@@ -39,7 +39,6 @@ if SFTP_HOST and not (CSV_PATH and os.path.exists(CSV_PATH)):
     t.connect(username=os.environ["SFTP_USER"],password=os.environ["SFTP_PASS"])
     s=paramiko.SFTPClient.from_transport(t)
     remote=os.environ["SFTP_FILE"]
-    # Hvis SFTP_FILE peger paa en mappe, tag den nyeste CSV deri
     try: is_dir=_stat.S_ISDIR(s.stat(remote).st_mode)
     except IOError: is_dir=remote.endswith("/")
     if is_dir:
@@ -115,6 +114,8 @@ for r in datarows:
     if k: stock[k]=stock.get(k,0)+sum(to_int(d.get(c)) for c in inv_cols)
 print("Laeste %d unikke SKU'er fra filen." % len(stock))
  
+# I OUTPUT_CSV-tilstand tager vi ALT med (ogsaa uaendret), saa import-filen er komplet
+FULL = bool(OUTPUT_CSV)
 auth()
 plan=[]; parent_sum={}; skus=list(stock)
  
@@ -133,9 +134,9 @@ for i in range(0,len(skus),40):
         if ptype=="VARIANT" and mid:
             parent_sum[mid]=parent_sum.get(mid,0)+val
         cur=cur_val(pr)
-        if cur is None or to_int(cur)!=val:
-            plan.append((pr["id"], pr.get("label") or sku, val)); writes+=1
-    print("  ...%d/%d SKU'er slaaet op, %d aendringer indtil nu" % (min(i+40,len(skus)),len(skus),writes))
+        if FULL or cur is None or to_int(cur)!=val:
+            plan.append((pr["id"], sku, pr.get("label") or sku, val)); writes+=1
+    print("  ...%d/%d SKU'er slaaet op, %d i planen indtil nu" % (min(i+40,len(skus)),len(skus),writes))
  
 # ---------- 3) PARENT-produkter: sum af boern ----------
 print("\nHenter PARENT-produkter...")
@@ -152,15 +153,25 @@ while True:
         mid=pr.get("product_family_model_id")
         if mid in parent_sum:
             val=parent_sum[mid]; cur=cur_val(pr)
-            if cur is None or to_int(cur)!=val:
-                plan.append((pr["id"], (pr.get("label") or pr.get("sku"))+" [PARENT]", val))
+            if FULL or cur is None or to_int(cur)!=val:
+                plan.append((pr["id"], pr.get("sku") or "", (pr.get("label") or pr.get("sku"))+" [PARENT]", val))
     page+=1
 print("  gennemgik %d PARENT-produkter." % parents)
  
-# ---------- 4) Resultat / skrivning ----------
+# ---------- 4a) Skriv import-fil (OUTPUT_CSV) ----------
+if OUTPUT_CSV:
+    with open(OUTPUT_CSV,"w",newline="",encoding="utf-8-sig") as f:
+        w=csv.writer(f); w.writerow(["SKU",TARGET])
+        for pid,sku,label,val in plan:
+            if sku: w.writerow([sku,val])
+    print("\nSkrev import-fil: %s med %d raekker (SKU,%s)." % (OUTPUT_CSV,len(plan),TARGET))
+    print("Importér den i Plytix (match paa SKU, opdatér eksisterende).")
+    sys.exit(0)
+ 
+# ---------- 4b) Plan / skrivning til API ----------
 print("\n=== PLAN ===")
 print("Produkter der skal opdateres:", len(plan))
-for pid,label,val in plan[:15]:
+for pid,sku,label,val in plan[:15]:
     print("  %-40s %s = %s" % (label[:40], TARGET, val))
 if len(plan)>15: print("  ... (+%d flere)" % (len(plan)-15))
  
@@ -170,7 +181,7 @@ if DRY:
  
 print("\nSkriver til Plytix...")
 ok=err=0
-for i,(pid,label,val) in enumerate(plan,1):
+for i,(pid,sku,label,val) in enumerate(plan,1):
     st,b=call("PATCH",BASE+"/products/%s"%pid,{"attributes":{TARGET:val}})
     if st in (200,201): ok+=1
     else:
