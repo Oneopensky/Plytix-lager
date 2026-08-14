@@ -23,5 +23,5 @@ jobs:
           SFTP_PASS: ${{ secrets.SFTP_PASS }}
           SFTP_FILE: ${{ secrets.SFTP_FILE }}
           EXCLUDE_LOCATIONS: 'Business Central,Fjernlager'
-          DRY_RUN: '1'
+          DRY_RUN: '0'
         run: python opdater_lager.py
