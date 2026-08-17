@@ -1,20 +1,21 @@
-name: Opdater Plytix lager
-
+name: Byg Plytix lager-import
+ 
 on:
   schedule:
-    - cron: '0 5 * * *'
+    - cron: '0 5 * * *'      # dagligt 05:00 UTC (07:00 dansk sommertid) - efter Matrixify
   workflow_dispatch: {}
-
+ 
 jobs:
-  opdater-lager:
+  byg-import:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install paramiko
-      - name: Opdater samlet_lager i Plytix
+      - name: Byg import-fil og laeg paa boksen
         env:
           PLX_KEY: ${{ secrets.PLX_KEY }}
           PLX_PWD: ${{ secrets.PLX_PWD }}
@@ -22,6 +23,7 @@ jobs:
           SFTP_USER: ${{ secrets.SFTP_USER }}
           SFTP_PASS: ${{ secrets.SFTP_PASS }}
           SFTP_FILE: ${{ secrets.SFTP_FILE }}
+          UPLOAD_PATH: '/Plytix-import/plytix_lager.csv'
+          FJERNLAGER_FIELD: 'fjernlager_antal'
           EXCLUDE_LOCATIONS: 'Business Central,Fjernlager'
-          DRY_RUN: '0'
         run: python opdater_lager.py
